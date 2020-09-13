@@ -78,7 +78,7 @@ class BazelBuildProvider extends EventEmitter {
 
 		bazelsRunning[this.cwd] -= 1;
 
-		return result;
+		return result.stdout;
 	}
 
 	destructor() {
@@ -107,7 +107,6 @@ class BazelBuildProvider extends EventEmitter {
 	}
 
 	settingsError(err) {
-
 		let shortErrMsg = "";
 		let fullErrMsg = "";
 		if(err && err.message) {
@@ -133,7 +132,6 @@ class BazelBuildProvider extends EventEmitter {
 			if(shortErrMsg.length > 64) {
 				shortErrMsg = shortErrMsg.substr(0, 64) + " (...)";
 			}
-
 		} else {
 			shortErrMsg = " unknown";
 			console.error("build-bazel bazel unknown error:", err);
@@ -154,97 +152,73 @@ class BazelBuildProvider extends EventEmitter {
 		return this.bazelTargets;
 	}
 
-	async settings() {
-
+	async addCategory(command, targetKinds) {
 		const execBazel = this.execBazel.bind(this);
-		let targetsErr = null;
 
-		const targetsRaw = await this.execBazel(
-			'query',
-			'--noimplicit_deps',
-			'--nohost_deps',
-			`kind('rule', deps(//...))`
-		).catch(err => {
-			targetsErr = err;
-			return "";
-		});
+		let targetsQuery = await execBazel(
+			"query",
+			"kind('" + targetKinds + "', //...)"
+		);
 
-		this._watch();
+		let targetNames = targetsQuery.split("\n");
+		let targets = [];
 
-		if(targetsErr) {
-			return this.settingsError(targetsErr);
+		for(let targetName of targetNames) {
+			targetName = targetName.trim();
+			if(targetName && targetName.startsWith("//")) {
+				targets.push(command + " " + targetName);
+			}
 		}
 
-		const targetNames = targetsRaw.split("\n");
+		if (targets.length > 0) {
+			if (command != "run") {
+				this.bazelTargets.push({
+					exec: this.bazelExec,
+					args: [command, "//..."],
+					name: command + " all",
+					cwd: this.cwd
+				});
+			}
 
-		this.bazelTargets = [
-			{
+			this.bazelTargets.push({
 				exec: this.bazelExec,
-				args: ["clean"],
-				name: "clean",
-				cwd: this.cwd,
-			},
-			{
-				exec: this.bazelExec,
-				name: "run",
+				name: command,
 				preBuild: async function() {
-					let runTargetsView = new RunTargetsView();
-
-					let result = await execBazel(
-						"query",
-						"kind('_binary', deps(//...))"
-					);
-
-					let runnableTargetNames = result.split("\n");
-					let runnableTargets = [];
-
-					for(let runTargetName of runnableTargetNames) {
-						runTargetName = runTargetName.trim();
-
-						if(!runTargetName || !runTargetName.startsWith("//")) {
-							continue;
-						}
-
-						runnableTargets.push(runTargetName);
-					}
-
-					runTargetsView.setItems(runnableTargets);
+					let targetsView = new RunTargetsView();
+					targetsView.setItems(targets);
 
 					try {
-						let confirmedTarget = await runTargetsView.awaitItemConfirmed();
-
-						this.args = [
-							"run",
-							confirmedTarget
-						];
+						let confirmedTarget = await targetsView.awaitItemConfirmed();
+						confirmedTarget = confirmedTarget.substring(command.length + 1);
+						this.args = [command, confirmedTarget];
 					} catch(err) {
 						this.exec = "echo";
 						this.args = [err];
 					}
 				}
-			},
-			{
-				exec: this.bazelExec,
-				args: ["build", "//...:*"],
-				name: "//...:*",
-				cwd: this.cwd,
-			}
-		];
-
-		for(let targetName of targetNames) {
-			targetName = targetName.trim();
-
-			if(!targetName || !targetName.startsWith("//")) {
-				continue;
-			}
-
-			this.bazelTargets.push({
-				exec: this.bazelExec,
-				args: ["build", targetName],
-				name: targetName,
-				cwd: this.cwd,
 			});
 		}
+	}
+
+	async settings() {
+		this._watch();
+
+		await this.addCategory("run", "binary");
+		await this.addCategory("test", "test");
+		await this.addCategory("build", "[binary,library,test]");
+
+		this.bazelTargets.push({
+			exec: this.bazelExec,
+			args: ["clean"],
+			name: "clean all",
+			cwd: this.cwd
+		});
+		this.bazelTargets.push({
+			exec: this.bazelExec,
+			args: ["clean", "--expunge"],
+			name: "expunge clean",
+			cwd: this.cwd
+		});
 
 		return this.bazelTargets;
 	}
